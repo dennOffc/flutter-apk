@@ -1,9 +1,77 @@
-name: Build Flutter APK
+namename: Build Flutter APK
 
 on:
   workflow_dispatch:
     inputs:
       zip_url:
+        description: 'URL zip project'
+        required: true
+      tag:
+        description: 'Tag release'
+        required: false
+      build_type:
+        description: 'Tipe build (release/debug)'
+        required: false
+        default: 'release'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download project zip
+        run: |
+          curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
+          unzip -o project.zip -d project
+
+      - name: Find pubspec.yaml
+        id: findpubspec
+        run: |
+          PUBSPEC=$(find project -name pubspec.yaml -type f | head -n 1)
+          if [ -z "$PUBSPEC" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan di zip!"
+            exit 1
+          fi
+          DIR=$(dirname "$PUBSPEC")
+          echo "project_dir=$DIR" >> $GITHUB_OUTPUT
+          echo "✅ Project ditemukan di: $DIR"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Get dependencies
+        working-directory: ${{ steps.findpubspec.outputs.project_dir }}
+        run: flutter pub get
+
+      - name: Build APK (Release)
+        if: ${{ github.event.inputs.build_type == 'release' }}
+        working-directory: ${{ steps.findpubspec.outputs.project_dir }}
+        run: flutter build apk --release
+
+      - name: Build APK (Debug)
+        if: ${{ github.event.inputs.build_type == 'debug' }}
+        working-directory: ${{ steps.findpubspec.outputs.project_dir }}
+        run: flutter build apk --debug
+
+      - name: Upload APK Release
+        if: ${{ github.event.inputs.build_type == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: ${{ steps.findpubspec.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload APK Debug
+        if: ${{ github.event.inputs.build_type == 'debug' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: ${{ steps.findpubspec.outputs.project_dir }}/build/app/outputs/flutter-apk/app-debug.apk:
         description: 'URL zip project'
         required: false
       tag:
