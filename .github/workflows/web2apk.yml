@@ -1,0 +1,128 @@
+name: Web2APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: 'URL Website'
+        required: true
+      app_name:
+        description: 'Nama Aplikasi'
+        required: true
+      icon_url:
+        description: 'Icon Url'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.0'
+          channel: stable
+          cache: true
+
+      - name: Create Flutter Project
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          PKG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_')
+          flutter create --org com.webapk --project-name "$PKG" myapp
+
+      - name: Add Dependencies
+        run: |
+          cd myapp
+          flutter pub add webview_flutter
+          flutter pub add flutter_launcher_icons
+          flutter pub add connectivity_plus
+          echo "  assets:" >> pubspec.yaml
+          echo "    - assets/icon/" >> pubspec.yaml
+
+      - name: Write main.dart
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          WEB_URL="${{ github.event.inputs.web_url }}"
+          cat > myapp/lib/main.dart << 'DART'
+          import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+
+          void main() {
+            runApp(const MyApp());
+          }
+
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'APPNAME_PLACEHOLDER',
+                debugShowCheckedModeBanner: false,
+                home: const WebViewPage(),
+              );
+            }
+          }
+
+          class WebViewPage extends StatefulWidget {
+            const WebViewPage({super.key});
+            @override
+            State<WebViewPage> createState() => _WebViewPageState();
+          }
+
+          class _WebViewPageState extends State<WebViewPage> {
+            late final WebViewController _controller;
+            @override
+            void initState() {
+              super.initState();
+              _controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..loadRequest(Uri.parse('URL_PLACEHOLDER'));
+            }
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(body: SafeArea(child: WebViewWidget(controller: _controller)));
+            }
+          }
+          DART
+          sed -i "s|APPNAME_PLACEHOLDER|$APP_NAME|g" myapp/lib/main.dart
+          sed -i "s|URL_PLACEHOLDER|$WEB_URL|g" myapp/lib/main.dart
+
+      - name: Fix Android Permissions
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          MANIFEST="myapp/android/app/src/main/AndroidManifest.xml"
+          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"\/>' $MANIFEST
+          sed -i "s/android:label=\"[^\"]*\"/android:label=\"$APP_NAME\"/" $MANIFEST
+
+      - name: Download Icon
+        run: |
+          mkdir -p myapp/assets/icon
+          sudo apt-get install -y imagemagick
+          curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/octet-stream" "${{ github.event.inputs.icon_url }}" -o myapp/assets/icon/icon_raw
+          convert myapp/assets/icon/icon_raw -resize 1024x1024 myapp/assets/icon/icon.png
+
+      - name: Generate Icons
+        run: |
+          cat > myapp/flutter_launcher_icons.yaml << 'EOF'
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "assets/icon/icon.png"
+            min_sdk_android: 21
+          EOF
+          cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
+
+      - name: Build APK
+        run: cd myapp && flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: web2apk-release
+          path: myapp/build/app/outputs/flutter-apk/app-release.apk
