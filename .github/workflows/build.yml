@@ -101,10 +101,10 @@ jobs:
           echo "✅ Pilih Flutter: $FLUTTER_VER"
           echo "flutter_version=$FLUTTER_VER" >> $GITHUB_OUTPUT
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@main
-        with:
-          flutter-version: ${{ steps.detect_sdk.outputs.flutter_version }}
+     - name: Setup Flutter
+      uses: subosito/flutter-action@main
+      with:
+          flutter-version: "3.35.4"
           channel: "stable"
           cache: true
 
