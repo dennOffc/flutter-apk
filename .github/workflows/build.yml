@@ -21,6 +21,7 @@ jobs:
     steps:
       - name: Download ZIP project
         run: |
+          echo "=== Downloading ZIP ==="
           curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
           ls -lh project.zip
           unzip -q project.zip -d project_raw
@@ -55,6 +56,31 @@ jobs:
           if [ -f "pubspec.yaml" ]; then
             flutter pub get
           fi
+
+      - name: Analyze Project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "=== FLUTTER ANALYZE ==="
+          flutter analyze > analyze.txt 2>&1 || true
+          cat analyze.txt
+          
+          ERROR_COUNT=$(grep -c "error" analyze.txt || true)
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo ""
+            echo "============================================"
+            echo "❌ KODE DART PROJECT KAMU ADA ERROR!"
+            echo "============================================"
+            echo ""
+            grep "error" analyze.txt | head -30
+            echo ""
+            echo "============================================"
+            echo "⚠️ PERBAIKI ERROR DI ATAS DULU!"
+            echo "============================================"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ Kode Dart bersih, lanjut build..."
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
