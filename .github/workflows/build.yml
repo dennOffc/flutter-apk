@@ -19,8 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download project zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
+          curl -L -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o project.zip "${{ github.event.inputs.zip_url }}"
+          ls -la project.zip
           unzip -o project.zip -d project
 
       - name: Find pubspec.yaml
@@ -33,7 +36,7 @@ jobs:
           fi
           DIR=$(dirname "$PUBSPEC")
           echo "project_dir=$DIR" >> $GITHUB_OUTPUT
-          echo "Project ditemukan di: $DIR"
+          echo "Project di: $DIR"
 
       - uses: actions/setup-java@v4
         with:
