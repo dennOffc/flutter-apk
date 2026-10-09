@@ -13,24 +13,35 @@ on:
         description: "debug / release"
         required: true
         default: "release"
+      only_analyze:
+        description: "Hanya jalankan analyze (true/false)"
+        required: false
+        default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
     steps:
       - name: Download ZIP project
         run: |
-          echo "=== Downloading ZIP ==="
-          curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.zip_url }}" \
+            -o project.zip
           ls -lh project.zip
-          unzip -q project.zip -d project_raw || {
-            echo "❌ FILE ZIP RUSAK — gagal di-extract"
-            exit 1
-          }
 
-      - name: Detect Project Dir
+      - name: Extract ZIP
         run: |
+          if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "❌ File bukan ZIP valid!"
+            exit 1
+          fi
+          unzip -q project.zip -d project_raw
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
           if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
@@ -46,153 +57,113 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@main
+      - name: Detect Dart SDK Requirement
+        id: detect_sdk
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "flutter_version=3.32.0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          SDK_LINE=$(grep -A5 "^environment:" pubspec.yaml | grep "sdk:" | head -n 1)
+          MIN_DART=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+          if [ -z "$MIN_DART" ]; then
+            MIN_DART=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -n 1)
+          fi
+          if [ -z "$MIN_DART" ]; then
+            MIN_DART="3.0.0"
+          fi
+          case "$MIN_DART" in
+            2.*)          FLUTTER_VER="3.7.12" ;;
+            3.0.*|3.1.*|3.2.*|3.3.*|3.4.*) FLUTTER_VER="3.19.6" ;;
+            3.5.*)        FLUTTER_VER="3.24.5" ;;
+            3.6.*|3.7.*)  FLUTTER_VER="3.29.3" ;;
+            3.8.*)        FLUTTER_VER="3.32.0" ;;
+            *)            FLUTTER_VER="3.35.0" ;;
+          esac
+          echo "flutter_version=$FLUTTER_VER" >> $GITHUB_OUTPUT
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v4
         with:
-          flutter-version: "3.35.0"
+          path: /home/runner/.flutter
+          key: flutter-sdk-${{ steps.detect_sdk.outputs.flutter_version }}-v1
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.detect_sdk.outputs.flutter_version }}
           channel: "stable"
           cache: true
+          pub-cache: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Cache Pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
 
       - name: Get dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            flutter pub get || echo "⚠️ pub get ada error, coba lanjut..."
+            timeout 300s flutter pub get
+          fi
+
+      - name: Analyze Project Code
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f "pubspec.yaml" ]; then
+            flutter analyze > analyze_report.txt 2>&1 || true
+            echo "[RESULT_ANALYZE]"
+            cat analyze_report.txt
+            echo "[END_RESULT_ANALYZE]"
+            rm -f analyze_report.txt
+          fi
+
+      - name: Stop if Analyze Only
+        if: ${{ github.event.inputs.only_analyze == 'true' }}
+        run: exit 1
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f "pubspec.yaml" ]; then
+            flutter build apk --${{ github.event.inputs.build_type }}
           else
-            echo "❌ pubspec.yaml tidak ditemukan — FATAL"
-            exit 1
-          fi
-
-      - name: Fix Missing Assets
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          if [ ! -f "pubspec.yaml" ]; then exit 0; fi
-
-          IN_ASSETS=0
-          while IFS= read -r line; do
-            if echo "$line" | grep -qE "^\s*assets:\s*$"; then
-              IN_ASSETS=1
-              continue
-            fi
-            if [ "$IN_ASSETS" -eq 1 ]; then
-              if echo "$line" | grep -qE "^\s{0,2}[a-z_]+:" && ! echo "$line" | grep -qE "^\s*-"; then
-                IN_ASSETS=0
-                continue
-              fi
-            fi
-            if [ "$IN_ASSETS" -eq 1 ]; then
-              ASSET_PATH=$(echo "$line" | sed -E 's/^\s*-\s*//' | tr -d '"' | tr -d "'")
-              if [ -z "$ASSET_PATH" ]; then continue; fi
-
-              if echo "$ASSET_PATH" | grep -qE "/$"; then
-                mkdir -p "$ASSET_PATH"
-              else
-                if [ ! -f "$ASSET_PATH" ]; then
-                  mkdir -p "$(dirname "$ASSET_PATH")"
-                  if echo "$ASSET_PATH" | grep -qE "\.mp4$"; then
-                    printf '\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41\x00\x00\x00\x08free' > "$ASSET_PATH"
-                  elif echo "$ASSET_PATH" | grep -qE "\.(png|jpg|jpeg|webp)$"; then
-                    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8\xa8\x00\x00\x00\x00IEND\xaeB\x60\x82' > "$ASSET_PATH"
-                  else
-                    touch "$ASSET_PATH"
-                  fi
-                fi
-              fi
-            fi
-          done < pubspec.yaml
-
-          echo "✅ Fix missing assets selesai"
-
-      - name: Analyze Project
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          echo "=== FLUTTER ANALYZE (info doang, ga ngeblok) ==="
-          flutter analyze > analyze.txt 2>&1 || true
-          cat analyze.txt
-
-          FATAL_COUNT=$(grep -E "^\s*error\s+•" analyze.txt | grep -E "syntax_error|undefined_identifier|undefined_method|undefined_class|compilation_error" | wc -l || true)
-
-          if [ "$FATAL_COUNT" -gt 0 ]; then
-            echo ""
-            echo "============================================"
-            echo "❌ ERROR FATAL — KODE DART RUSAK!"
-            echo "============================================"
-            echo ""
-            grep -E "^\s*error\s+•" analyze.txt | grep -E "syntax_error|undefined_identifier|undefined_method|undefined_class|compilation_error" | head -20
-            echo ""
-            echo "============================================"
-            echo "⚠️ Error ini bikin build PASTI gagal!"
-            echo "============================================"
-            exit 1
-          fi
-
-          echo ""
-          echo "✅ Analyze selesai — lanjut build..."
-
-      - name: Build APK Release (Split per ABI, Ultra Kecil)
-        if: ${{ github.event.inputs.build_type == 'release' }}
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan — FATAL"
-            exit 1
-          fi
-
-          echo "🚀 Release build — split per ABI + shrink + obfuscate + no tree-shake icons"
-          flutter build apk --release \
-            --split-per-abi \
-            --shrink \
-            --obfuscate \
-            --split-debug-info=build/debug_info \
-            --target-platform android-arm64,android-arm
-
-      - name: Build APK Debug (Split per ABI, Kecil)
-        if: ${{ github.event.inputs.build_type == 'debug' }}
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan — FATAL"
-            exit 1
-          fi
-
-          echo "🐞 Debug build — split per ABI + shrink"
-          flutter build apk --debug \
-            --split-per-abi \
-            --shrink \
-            --target-platform android-arm64,android-arm
-
-      - name: Organize APKs
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          mkdir -p build/final-apk
-          find build/app/outputs/flutter-apk -name "*.apk" -type f | while read apk; do
-            ORIGINAL=$(basename "$apk")
-            SIZE=$(du -h "$apk" | cut -f1)
-            echo "📦 Found: $ORIGINAL ($SIZE)"
-            
-            if echo "$ORIGINAL" | grep -q "arm64-v8a"; then
-              cp "$apk" "build/final-apk/app-arm64-v8a.apk"
-            elif echo "$ORIGINAL" | grep -q "armeabi-v7a"; then
-              cp "$apk" "build/final-apk/app-armeabi-v7a.apk"
-            elif echo "$ORIGINAL" | grep -q "x86_64"; then
-              cp "$apk" "build/final-apk/app-x86_64.apk"
+            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+            GRADLE_DIR=$(dirname "$GRADLE_PATH")
+            cd "$GRADLE_DIR" && chmod +x gradlew
+            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+              ./gradlew assembleDebug
             else
-              cp "$apk" "build/final-apk/app-$ORIGINAL"
+              ./gradlew assembleRelease
             fi
-          done
-          
-          echo ""
-          echo "=== FINAL APK SIZES ==="
-          ls -lh build/final-apk/
-          
-          echo ""
-          echo "=== TOTAL SIZE ==="
-          du -sh build/final-apk/
+          fi
 
-      - name: Upload APK
+      - name: Check APK Output
+        run: |
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
-          path: ${{ env.PROJECT_DIR }}/build/final-apk/*.apk
+          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
