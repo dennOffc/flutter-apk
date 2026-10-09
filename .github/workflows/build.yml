@@ -1,4 +1,4 @@
-namename: Build Flutter APK
+name: Build Flutter APK
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: 'Tag release'
         required: false
       build_type:
-        description: 'Tipe build (release/debug)'
+        description: 'Tipe build'
         required: false
         default: 'release'
 
@@ -28,12 +28,12 @@ jobs:
         run: |
           PUBSPEC=$(find project -name pubspec.yaml -type f | head -n 1)
           if [ -z "$PUBSPEC" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan di zip!"
+            echo "pubspec.yaml tidak ditemukan!"
             exit 1
           fi
           DIR=$(dirname "$PUBSPEC")
           echo "project_dir=$DIR" >> $GITHUB_OUTPUT
-          echo "✅ Project ditemukan di: $DIR"
+          echo "Project ditemukan di: $DIR"
 
       - uses: actions/setup-java@v4
         with:
@@ -49,12 +49,12 @@ jobs:
         working-directory: ${{ steps.findpubspec.outputs.project_dir }}
         run: flutter pub get
 
-      - name: Build APK (Release)
+      - name: Build APK Release
         if: ${{ github.event.inputs.build_type == 'release' }}
         working-directory: ${{ steps.findpubspec.outputs.project_dir }}
         run: flutter build apk --release
 
-      - name: Build APK (Debug)
+      - name: Build APK Debug
         if: ${{ github.event.inputs.build_type == 'debug' }}
         working-directory: ${{ steps.findpubspec.outputs.project_dir }}
         run: flutter build apk --debug
@@ -71,37 +71,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: ${{ steps.findpubspec.outputs.project_dir }}/build/app/outputs/flutter-apk/app-debug.apk:
-        description: 'URL zip project'
-        required: false
-      tag:
-        description: 'Tag release'
-        required: false
-      build_type:
-        description: 'Tipe build'
-        required: false
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
-
-      - name: Build APK
-        run: flutter build apk --release
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ steps.findpubspec.outputs.project_dir }}/build/app/outputs/flutter-apk/app-debug.apk
