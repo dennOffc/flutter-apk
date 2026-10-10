@@ -96,7 +96,7 @@ jobs:
           sed -i "s|APPNAME_PLACEHOLDER|$APP_NAME|g" myapp/lib/main.dart
           sed -i "s|URL_PLACEHOLDER|$WEB_URL|g" myapp/lib/main.dart
 
-      - name: Fix Android Permissions (aman kalau gagal)
+      - name: Fix Android Permissions
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           MANIFEST="myapp/android/app/src/main/AndroidManifest.xml"
@@ -129,17 +129,17 @@ jobs:
           EOF
           cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml || true
 
-      - name: Build APK (WAJIB SUKSES)
+      - name: Flutter Build APK
         run: |
           cd myapp
           SUCCESS=0
-          flutter build apk --release 2>&1 | tee /tmp/w2a1.log
+          flutter build apk --release 2>&1 | tee /tmp/w2a1.log || true
           if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
 
           if [ "$SUCCESS" -eq 0 ]; then
             flutter clean || true
             flutter pub get || true
-            flutter build apk --release 2>&1 | tee /tmp/w2a2.log
+            flutter build apk --release 2>&1 | tee /tmp/w2a2.log || true
             if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
           fi
 
