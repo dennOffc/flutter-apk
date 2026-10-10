@@ -175,7 +175,6 @@ jobs:
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           SUCCESS=0
 
-          # PRE-BUILD: auto-strip assets yang hilang
           echo "════════ PRE-BUILD: sanitasi assets ════════"
           if [ -f "pubspec.yaml" ]; then
             cp pubspec.yaml pubspec.yaml.bak
@@ -183,8 +182,7 @@ jobs:
           import os
           try:
               with open("pubspec.yaml", "r") as f:
-                  lines = f.read().split("
-")
+                  lines = f.read().split("\n")
               out, in_assets = [], False
               for line in lines:
                   stripped = line.strip()
@@ -193,7 +191,7 @@ jobs:
                       out.append(line)
                       continue
                   if in_assets:
-                      if line and not line[0] in (" ", "	") and not stripped.startswith("-"):
+                      if line and not line[0] in (" ", "\t") and not stripped.startswith("-"):
                           in_assets = False
                           out.append(line)
                           continue
@@ -204,20 +202,17 @@ jobs:
                               continue
                   out.append(line)
               with open("pubspec.yaml", "w") as f:
-                  f.write("
-".join(out))
+                  f.write("\n".join(out))
               print("✅ Assets sanitized")
           except Exception as e:
               print(f"⚠️ Asset sanitize error: {e}")
           PYEOF
           fi
 
-          # ATTEMPT 1
           echo "════════ ATTEMPT 1 ════════"
           flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build1.log || true
           if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
 
-          # ATTEMPT 2
           if [ "$SUCCESS" -eq 0 ]; then
             echo "════════ ATTEMPT 2: clean + rebuild ════════"
             flutter clean || true
@@ -226,14 +221,12 @@ jobs:
             if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
           fi
 
-          # ATTEMPT 3
           if [ "$SUCCESS" -eq 0 ]; then
             echo "════════ ATTEMPT 3: --no-shrink ════════"
             flutter build apk --$BUILD_TYPE --no-shrink 2>&1 | tee /tmp/build3.log || true
             if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
           fi
 
-          # GAGAL TOTAL
           if [ "$SUCCESS" -eq 0 ]; then
             FINAL_LOG=/tmp/build3.log
             if [ ! -s "$FINAL_LOG" ]; then FINAL_LOG=/tmp/build2.log; fi
