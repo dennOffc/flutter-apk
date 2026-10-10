@@ -36,58 +36,31 @@ jobs:
     steps:
       - name: Download Project
         run: |
-          echo "=== Downloading ZIP ==="
           curl -L --fail --retry 3 --retry-delay 2 \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip || {
-              echo "[RESULT_PUB_ERROR]"
-              echo "❌ Gagal download ZIP."
-              echo "[END_RESULT_PUB_ERROR]"
-              exit 1
-            }
+            -o project.zip || exit 1
           ls -lh project.zip
 
       - name: Extract Project
         run: |
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "⚠️ ZIP tidak valid, coba repair..."
             zip -FF project.zip --out project_fixed.zip > /dev/null 2>&1 || true
             if [ -f project_fixed.zip ] && unzip -t project_fixed.zip > /dev/null 2>&1; then
               mv project_fixed.zip project.zip
             fi
-            if ! unzip -t project.zip > /dev/null 2>&1; then
-              mkdir -p project_raw
-              unzip -o -q project.zip -d project_raw || true
-              if [ -z "$(ls -A project_raw 2>/dev/null)" ]; then
-                echo "[RESULT_PUB_ERROR]"
-                echo "❌ ZIP tidak bisa di-extract."
-                echo "[END_RESULT_PUB_ERROR]"
-                exit 1
-              fi
-            fi
           fi
-
-          if [ ! -d "project_raw" ] || [ -z "$(ls -A project_raw 2>/dev/null)" ]; then
+          if [ ! -d "project_raw" ]; then
             unzip -q project.zip -d project_raw || true
           fi
-
-          echo "=== Struktur project_raw ==="
-          find project_raw -maxdepth 3 -type d | head -n 20
-
           PUB_PATH=$(find project_raw -maxdepth 4 -name "pubspec.yaml" 2>/dev/null | head -n 1)
           if [ -z "$PUB_PATH" ]; then
-            echo "[RESULT_PUB_ERROR]"
-            echo "❌ pubspec.yaml tidak ditemukan sama sekali di ZIP."
-            echo "[END_RESULT_PUB_ERROR]"
+            echo "❌ pubspec.yaml tidak ditemukan."
             exit 1
           fi
           PROJECT_DIR=$(dirname "$PUB_PATH")
-          echo "✅ pubspec.yaml ada di: $PUB_PATH"
-          echo "✅ PROJECT_DIR: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          rm -f project.zip project_fixed.zip
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -95,267 +68,49 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Detect SDK
-        id: detect_sdk
-        run: |
-          cd "$PROJECT_DIR"
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "flutter_version=3.32.0" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          SDK_LINE=$(grep -A5 "^environment:" pubspec.yaml | grep "sdk:" | head -n 1)
-          MIN_DART=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-          if [ -z "$MIN_DART" ]; then
-            MIN_DART=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -n 1)
-          fi
-          if [ -z "$MIN_DART" ]; then
-            MIN_DART="3.0.0"
-          fi
-          case "$MIN_DART" in
-            2.*)          FLUTTER_VER="3.7.12" ;;
-            3.0.*|3.1.*|3.2.*|3.3.*|3.4.*) FLUTTER_VER="3.19.6" ;;
-            3.5.*)        FLUTTER_VER="3.24.5" ;;
-            3.6.*|3.7.*)  FLUTTER_VER="3.29.3" ;;
-            3.8.*)        FLUTTER_VER="3.32.0" ;;
-            *)            FLUTTER_VER="3.35.0" ;;
-          esac
-          echo "flutter_version=$FLUTTER_VER" >> $GITHUB_OUTPUT
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ steps.detect_sdk.outputs.flutter_version }}
+          flutter-version: "3.32.0"
           channel: "stable"
           cache: true
 
       - name: Install Dependencies
         run: |
           cd "$PROJECT_DIR"
-          echo "📍 PWD: $(pwd)"
           rm -f pubspec.lock
-
-          if timeout 300s flutter pub get > /tmp/pubget.log 2>&1; then
-            echo "✅ pub get sukses"; cat /tmp/pubget.log; exit 0
-          fi
-          if timeout 300s flutter pub upgrade > /tmp/pubget.log 2>&1; then
-            echo "✅ pub upgrade sukses"; cat /tmp/pubget.log; exit 0
-          fi
-          if timeout 300s flutter pub upgrade --major-versions > /tmp/pubget.log 2>&1; then
-            echo "✅ pub upgrade --major-versions sukses"; cat /tmp/pubget.log; exit 0
-          fi
-          rm -f pubspec.lock
-          if timeout 300s flutter pub get --offline > /tmp/pubget.log 2>&1; then
-            echo "✅ pub get --offline sukses"; cat /tmp/pubget.log; exit 0
-          fi
-          echo "⚠️ pub get gagal, tetap lanjut."
-          cat /tmp/pubget.log
-          exit 0
-
-      - name: Analyze Code
-        run: |
-          cd "$PROJECT_DIR"
-          if [ -f "pubspec.yaml" ]; then
-            flutter analyze > analyze_report.txt 2>&1 || true
-            echo "[RESULT_ANALYZE]"
-            cat analyze_report.txt
-            echo "[END_RESULT_ANALYZE]"
-            rm -f analyze_report.txt
-          fi
-
-      - name: Analyze Only Mode
-        if: ${{ github.event.inputs.only_analyze == 'true' }}
-        run: |
-          echo "✅ Analyze selesai."
-          exit 0
+          flutter pub get || flutter pub upgrade || true
 
       - name: Build APK
         run: |
           cd "$PROJECT_DIR"
-          echo "📍 PWD: $(pwd)"
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           SUCCESS=0
-
-          echo "════════ PRE-BUILD: auto-fix pubspec.yaml ════════"
-          if [ -f "pubspec.yaml" ]; then
-            cp pubspec.yaml pubspec.yaml.bak
-
-            python3 - <<'PYEOF' 2>/dev/null || true
-import os, re, sys
-
-def sanitize_pubspec(path="pubspec.yaml"):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception as e:
-        print(f"⚠️ Gagal baca pubspec.yaml: {e}")
-        return False
-
-    lines = content.split("
-")
-
-    # STEP 1: Deteksi duplicate top-level keys
-    top_keys = {}
-    for i, line in enumerate(lines):
-        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(?:#.*)?$', line)
-        if m:
-            key = m.group(1)
-            top_keys.setdefault(key, []).append(i)
-
-    dup_keys = {k: v for k, v in top_keys.items() if len(v) > 1}
-
-    if dup_keys:
-        print(f"⚠️ Duplicate keys ditemukan: {list(dup_keys.keys())}")
-        new_lines = list(lines)
-        for key, indices in dup_keys.items():
-            first_idx = indices[0]
-            merged = []
-            for dup_idx in indices[1:]:
-                j = dup_idx + 1
-                while j < len(new_lines):
-                    ln = new_lines[j]
-                    if ln.strip() == "":
-                        j += 1
-                        continue
-                    if not ln.startswith((" ", "\t")):
-                        break
-                    merged.append(ln)
-                    j += 1
-
-            for dup_idx in reversed(indices[1:]):
-                j = dup_idx
-                while j < len(new_lines):
-                    ln = new_lines[j]
-                    if j == dup_idx:
-                        j += 1
-                        continue
-                    if ln.strip() == "":
-                        j += 1
-                        continue
-                    if not ln.startswith((" ", "\t")):
-                        break
-                    j += 1
-                del new_lines[dup_idx:j]
-
-            insert_pos = first_idx + 1
-            while insert_pos < len(new_lines) and (
-                new_lines[insert_pos].strip() == "" or
-                new_lines[insert_pos].startswith((" ", "\t"))
-            ):
-                insert_pos += 1
-            for ln in merged:
-                new_lines.insert(insert_pos, ln)
-                insert_pos += 1
-
-        lines = new_lines
-        print(f"✅ Duplicate keys di-merge: {list(dup_keys.keys())}")
-
-    # STEP 2: Sanitize missing assets
-    out, in_assets = [], False
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r'^assets\s*:\s*(?:#.*)?$', stripped):
-            in_assets = True
-            out.append(line)
-            continue
-        if in_assets:
-            if line and not line[0] in (" ", "\t") and not stripped.startswith("-"):
-                in_assets = False
-                out.append(line)
-                continue
-            if stripped.startswith("-"):
-                p = stripped[1:].strip().strip('"').strip("'")
-                if p and not os.path.exists(p):
-                    print(f"  ⚠️ Skip missing asset: {p}")
-                    continue
-        out.append(line)
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(out))
-    print("✅ pubspec.yaml berhasil di-sanitize")
-    return True
-
-sanitize_pubspec()
-
-# Validasi YAML
-try:
-    import yaml
-    with open("pubspec.yaml", "r", encoding="utf-8") as f:
-        yaml.safe_load(f)
-    print("✅ pubspec.yaml VALID YAML")
-except Exception as e:
-    print(f"⚠️ pubspec.yaml masih ERROR: {e}")
-    try:
-        import shutil
-        shutil.copy("pubspec.yaml.bak", "pubspec.yaml")
-        print("⚠️ Restore dari backup")
-    except Exception:
-        pass
-PYEOF
-
-            echo "=== pubspec.yaml (20 baris pertama) ==="
-            head -n 20 pubspec.yaml
-          fi
-
-          echo "════════ ATTEMPT 1 ════════"
           flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build1.log || true
-          if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
-
+          if [ -n "$(find . -name '*.apk' | head -n 1)" ]; then SUCCESS=1; fi
           if [ "$SUCCESS" -eq 0 ]; then
-            echo "════════ ATTEMPT 2: clean + rebuild ════════"
             flutter clean || true
             flutter pub get || true
             flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build2.log || true
-            if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
+            if [ -n "$(find . -name '*.apk' | head -n 1)" ]; then SUCCESS=1; fi
           fi
-
           if [ "$SUCCESS" -eq 0 ]; then
-            echo "════════ ATTEMPT 3: --no-shrink ════════"
-            flutter build apk --$BUILD_TYPE --no-shrink 2>&1 | tee /tmp/build3.log || true
-            if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
-          fi
-
-          if [ "$SUCCESS" -eq 0 ]; then
-            FINAL_LOG=/tmp/build3.log
-            if [ ! -s "$FINAL_LOG" ]; then FINAL_LOG=/tmp/build2.log; fi
-            if [ ! -s "$FINAL_LOG" ]; then FINAL_LOG=/tmp/build1.log; fi
-
-            echo "[RESULT_PUB_ERROR]"
-            echo "❌ Build GAGAL setelah 3x percobaan."
-            echo ""
-            echo "=== DART ERRORS ==="
-            grep -nE '(\.dart:[0-9]+:[0-9]+:|Error:|Duplicate mapping key|Please correct)' "$FINAL_LOG" 2>/dev/null | head -n 30 || echo "(tidak ada error Dart/pubspec)"
-            echo "=== END DART ERRORS ==="
-            echo ""
-            echo "=== GRADLE ERRORS ==="
-            grep -iE "(FAILURE:|What went wrong|Execution failed|Could not)" "$FINAL_LOG" 2>/dev/null | head -n 10 || echo "(tidak ada error Gradle)"
-            echo "=== END GRADLE ERRORS ==="
-            echo ""
-            echo "=== 40 BARIS TERAKHIR ==="
-            tail -n 40 "$FINAL_LOG" 2>/dev/null || true
-            echo "[END_RESULT_PUB_ERROR]"
+            echo "❌ Build GAGAL."
             exit 1
           fi
-
-          echo "✅ Build sukses, APK ada."
+          echo "✅ Build sukses."
 
       - name: Locate APK
         id: find_apk
-        if: ${{ github.event.inputs.only_analyze != 'true' }}
         run: |
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" 2>/dev/null | head -n 1)
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
           if [ -z "$APK_FOUND" ]; then
-            echo "[RESULT_PUB_ERROR]"
             echo "❌ APK tidak ditemukan."
-            find $GITHUB_WORKSPACE -maxdepth 4 -type d | head -n 30
-            echo "[END_RESULT_PUB_ERROR]"
             exit 1
           fi
           echo "APK_PATH=$APK_FOUND" >> $GITHUB_OUTPUT
-          echo "✅ APK: $APK_FOUND"
-          ls -lh "$APK_FOUND"
 
       - name: Upload APK
-        if: ${{ github.event.inputs.only_analyze != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
