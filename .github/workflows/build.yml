@@ -10,29 +10,17 @@ on:
       build_type:
         required: true
         default: "release"
-        type: choice
-        options:
-          - release
-          - debug
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      - name: Download
+      - name: Setup
         run: |
-          curl -L --retry 3 \
-            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
-            "${{ github.event.inputs.zip_url }}" \
-            -o project.zip
-
-      - name: Extract
-        run: |
-          unzip -q project.zip -d project_raw || true
-          PUB=$(find project_raw -maxdepth 4 -name "pubspec.yaml" | head -n 1)
-          echo "PROJECT_DIR=$(dirname $PUB)" >> $GITHUB_ENV
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
 
       - name: Java
         uses: actions/setup-java@v4
@@ -47,30 +35,75 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Dependencies
+      - name: Extract
         run: |
-          cd "$PROJECT_DIR"
-          rm -f pubspec.lock
-          flutter pub get || flutter pub upgrade || true
+          curl -sL -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "${{ github.event.inputs.zip_url }}" -o p.zip
+          mkdir -p src
+          unzip -q p.zip -d src 2>/dev/null || true
+          PUB=$(find src -maxdepth 5 -name pubspec.yaml | head -n 1)
+          if [ -z "$PUB" ]; then echo "❌ pubspec.yaml tidak ada"; exit 1; fi
+          DIR=$(dirname "$PUB")
+          echo "DIR=$DIR" >> $GITHUB_ENV
+
+      - name: Clean Pubspec
+        run: |
+          cd "$DIR"
+
+          # Hapus duplicate top-level keys
+          awk '
+            /^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*:/ {
+              key = $1
+              sub(/:.*/, "", key)
+              if (seen[key]++) next
+            }
+            { print }
+          ' pubspec.yaml > pubspec.tmp && mv pubspec.tmp pubspec.yaml || true
+
+          # Hapus assets yang filenya gak ada
+          awk '
+            BEGIN { in_assets = 0 }
+            /^[[:space:]]*assets[[:space:]]*:/ { in_assets = 1; print; next }
+            {
+              if (in_assets) {
+                if ($0 !~ /^[[:space:]]/ && $0 !~ /^[[:space:]]*-/) {
+                  in_assets = 0
+                  print
+                  next
+                }
+                if ($0 ~ /^[[:space:]]*-/) {
+                  p = $0
+                  sub(/^[[:space:]]*-[[:space:]]*/, "", p)
+                  gsub(/["\x27]/, "", p)
+                  cmd = "test -e \"" p "\""
+                  if (system(cmd) != 0) next
+                }
+              }
+              print
+            }
+          ' pubspec.yaml > pubspec.tmp && mv pubspec.tmp pubspec.yaml || true
+
+          echo "✅ pubspec clean"
 
       - name: Build
         run: |
-          cd "$PROJECT_DIR"
-          flutter build apk --${{ github.event.inputs.build_type }} || \
-          (flutter clean && flutter pub get && flutter build apk --${{ github.event.inputs.build_type }})
+          cd "$DIR"
+          rm -f pubspec.lock
+          flutter pub get || flutter pub upgrade --major-versions || true
+          flutter build apk --${{ github.event.inputs.build_type }} --target-platform android-arm64 || \
+          flutter build apk --${{ github.event.inputs.build_type }} || true
 
-      - name: Locate APK
+      - name: Find APK
         id: find
         run: |
           APK=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          if [ -z "$APK" ]; then
-            echo "APK tidak ditemukan"
-            exit 1
-          fi
+          if [ -z "$APK" ]; then echo "❌ APK tidak ada"; exit 1; fi
           echo "APK_PATH=$APK" >> $GITHUB_OUTPUT
+          ls -lh "$APK"
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.tag }}
           path: ${{ steps.find.outputs.APK_PATH }}
+          retention-days: 1
+          if-no-files-found: error
