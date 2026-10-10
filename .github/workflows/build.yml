@@ -34,7 +34,7 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      - name: Download ZIP project
+      - name: Download Project
         run: |
           echo "=== Downloading ZIP ==="
           curl -L --fail --retry 3 --retry-delay 2 \
@@ -49,7 +49,7 @@ jobs:
             }
           ls -lh project.zip
 
-      - name: Extract ZIP
+      - name: Extract Project
         run: |
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "⚠️ ZIP tidak valid, coba repair..."
@@ -95,7 +95,7 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Detect Dart SDK
+      - name: Detect SDK
         id: detect_sdk
         run: |
           cd "$PROJECT_DIR"
@@ -128,7 +128,7 @@ jobs:
           channel: "stable"
           cache: true
 
-      - name: Get dependencies
+      - name: Install Dependencies
         run: |
           cd "$PROJECT_DIR"
           echo "📍 PWD: $(pwd)"
@@ -151,7 +151,7 @@ jobs:
           cat /tmp/pubget.log
           exit 0
 
-      - name: Analyze Project Code
+      - name: Analyze Code
         run: |
           cd "$PROJECT_DIR"
           if [ -f "pubspec.yaml" ]; then
@@ -162,51 +162,138 @@ jobs:
             rm -f analyze_report.txt
           fi
 
-      - name: Stop if Analyze Only
+      - name: Analyze Only Mode
         if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: |
           echo "✅ Analyze selesai."
           exit 0
 
-      - name: Build APK (auto-tambal + deteksi error Dart)
+      - name: Build APK
         run: |
           cd "$PROJECT_DIR"
           echo "📍 PWD: $(pwd)"
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           SUCCESS=0
 
-          echo "════════ PRE-BUILD: sanitasi assets ════════"
+          echo "════════ PRE-BUILD: auto-fix pubspec.yaml ════════"
           if [ -f "pubspec.yaml" ]; then
             cp pubspec.yaml pubspec.yaml.bak
+
             python3 - <<'PYEOF' 2>/dev/null || true
-          import os
-          try:
-              with open("pubspec.yaml", "r") as f:
-                  lines = f.read().split("\n")
-              out, in_assets = [], False
-              for line in lines:
-                  stripped = line.strip()
-                  if stripped.startswith("assets:"):
-                      in_assets = True
-                      out.append(line)
-                      continue
-                  if in_assets:
-                      if line and not line[0] in (" ", "\t") and not stripped.startswith("-"):
-                          in_assets = False
-                          out.append(line)
-                          continue
-                      if stripped.startswith("-"):
-                          p = stripped[1:].strip().strip('"').strip("'")
-                          if p and not os.path.exists(p):
-                              print(f"  ⚠️ Skip missing asset: {p}")
-                              continue
-                  out.append(line)
-              with open("pubspec.yaml", "w") as f:
-                  f.write("\n".join(out))
-              print("✅ Assets sanitized")
-          except Exception as e:
-              print(f"⚠️ Asset sanitize error: {e}")
-          PYEOF
+import os, re, sys
+
+def sanitize_pubspec(path="pubspec.yaml"):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"⚠️ Gagal baca pubspec.yaml: {e}")
+        return False
+
+    lines = content.split("
+")
+
+    # STEP 1: Deteksi duplicate top-level keys
+    top_keys = {}
+    for i, line in enumerate(lines):
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(?:#.*)?$', line)
+        if m:
+            key = m.group(1)
+            top_keys.setdefault(key, []).append(i)
+
+    dup_keys = {k: v for k, v in top_keys.items() if len(v) > 1}
+
+    if dup_keys:
+        print(f"⚠️ Duplicate keys ditemukan: {list(dup_keys.keys())}")
+        new_lines = list(lines)
+        for key, indices in dup_keys.items():
+            first_idx = indices[0]
+            merged = []
+            for dup_idx in indices[1:]:
+                j = dup_idx + 1
+                while j < len(new_lines):
+                    ln = new_lines[j]
+                    if ln.strip() == "":
+                        j += 1
+                        continue
+                    if not ln.startswith((" ", "\t")):
+                        break
+                    merged.append(ln)
+                    j += 1
+
+            for dup_idx in reversed(indices[1:]):
+                j = dup_idx
+                while j < len(new_lines):
+                    ln = new_lines[j]
+                    if j == dup_idx:
+                        j += 1
+                        continue
+                    if ln.strip() == "":
+                        j += 1
+                        continue
+                    if not ln.startswith((" ", "\t")):
+                        break
+                    j += 1
+                del new_lines[dup_idx:j]
+
+            insert_pos = first_idx + 1
+            while insert_pos < len(new_lines) and (
+                new_lines[insert_pos].strip() == "" or
+                new_lines[insert_pos].startswith((" ", "\t"))
+            ):
+                insert_pos += 1
+            for ln in merged:
+                new_lines.insert(insert_pos, ln)
+                insert_pos += 1
+
+        lines = new_lines
+        print(f"✅ Duplicate keys di-merge: {list(dup_keys.keys())}")
+
+    # STEP 2: Sanitize missing assets
+    out, in_assets = [], False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^assets\s*:\s*(?:#.*)?$', stripped):
+            in_assets = True
+            out.append(line)
+            continue
+        if in_assets:
+            if line and not line[0] in (" ", "\t") and not stripped.startswith("-"):
+                in_assets = False
+                out.append(line)
+                continue
+            if stripped.startswith("-"):
+                p = stripped[1:].strip().strip('"').strip("'")
+                if p and not os.path.exists(p):
+                    print(f"  ⚠️ Skip missing asset: {p}")
+                    continue
+        out.append(line)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out))
+    print("✅ pubspec.yaml berhasil di-sanitize")
+    return True
+
+sanitize_pubspec()
+
+# Validasi YAML
+try:
+    import yaml
+    with open("pubspec.yaml", "r", encoding="utf-8") as f:
+        yaml.safe_load(f)
+    print("✅ pubspec.yaml VALID YAML")
+except Exception as e:
+    print(f"⚠️ pubspec.yaml masih ERROR: {e}")
+    try:
+        import shutil
+        shutil.copy("pubspec.yaml.bak", "pubspec.yaml")
+        print("⚠️ Restore dari backup")
+    except Exception:
+        pass
+PYEOF
+
+            echo "=== pubspec.yaml (20 baris pertama) ==="
+            head -n 20 pubspec.yaml
           fi
 
           echo "════════ ATTEMPT 1 ════════"
@@ -236,7 +323,7 @@ jobs:
             echo "❌ Build GAGAL setelah 3x percobaan."
             echo ""
             echo "=== DART ERRORS ==="
-            grep -nE '(\.dart:[0-9]+:[0-9]+:.*(Error|error)|Error:.*\.dart)' "$FINAL_LOG" 2>/dev/null | head -n 20 || echo "(tidak ada error Dart)"
+            grep -nE '(\.dart:[0-9]+:[0-9]+:|Error:|Duplicate mapping key|Please correct)' "$FINAL_LOG" 2>/dev/null | head -n 30 || echo "(tidak ada error Dart/pubspec)"
             echo "=== END DART ERRORS ==="
             echo ""
             echo "=== GRADLE ERRORS ==="
@@ -251,7 +338,7 @@ jobs:
 
           echo "✅ Build sukses, APK ada."
 
-      - name: Find APK Output
+      - name: Locate APK
         id: find_apk
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         run: |
@@ -267,7 +354,7 @@ jobs:
           echo "✅ APK: $APK_FOUND"
           ls -lh "$APK_FOUND"
 
-      - name: Upload APK artifact
+      - name: Upload APK
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         uses: actions/upload-artifact@v4
         with:
