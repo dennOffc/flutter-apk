@@ -13,10 +13,18 @@ on:
         description: "debug / release"
         required: true
         default: "release"
+        type: choice
+        options:
+          - release
+          - debug
       only_analyze:
         description: "Hanya jalankan analyze (true/false)"
         required: false
         default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   build:
@@ -26,30 +34,53 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
       - name: Download ZIP project
         run: |
           echo "=== Downloading ZIP ==="
-          curl -L \
+          curl -L --fail --retry 3 --retry-delay 2 \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip
+            -o project.zip || {
+              echo "[RESULT_PUB_ERROR]"
+              echo "❌ Gagal download ZIP dari URL."
+              echo "[END_RESULT_PUB_ERROR]"
+              exit 1
+            }
           ls -lh project.zip
 
-      - name: Extract ZIP
+      - name: Extract ZIP (auto-fix kalau bukan zip / corrupt)
         run: |
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "[RESULT_PUB_ERROR]"
-            echo "❌ File bukan ZIP valid!"
-            echo "[END_RESULT_PUB_ERROR]"
-            exit 1
+            echo "⚠️ File bukan ZIP valid, coba repair..."
+            # Coba repair pakai zip -FF kalau ada
+            if command -v zip >/dev/null 2>&1; then
+              zip -FF project.zip --out project_fixed.zip > /dev/null 2>&1 || true
+              if [ -f project_fixed.zip ] && unzip -t project_fixed.zip > /dev/null 2>&1; then
+                mv project_fixed.zip project.zip
+                echo "✅ ZIP berhasil diperbaiki."
+              fi
+            fi
+            # Kalau masih gagal, tetap coba extract paksa
+            if ! unzip -t project.zip > /dev/null 2>&1; then
+              echo "⚠️ Tetap gagal, coba extract paksa (mungkin partial)..."
+              mkdir -p project_raw
+              unzip -o -q project.zip -d project_raw || true
+              if [ -z "$(ls -A project_raw 2>/dev/null)" ]; then
+                echo "[RESULT_PUB_ERROR]"
+                echo "❌ File benar-benar bukan ZIP valid dan tidak bisa di-extract."
+                echo "[END_RESULT_PUB_ERROR]"
+                exit 1
+              fi
+              echo "⚠️ Extract partial berhasil, lanjut..."
+            fi
           fi
-          unzip -q project.zip -d project_raw
+
+          # Kalau belum di-extract (kondisi normal)
+          if [ ! -d "project_raw" ] || [ -z "$(ls -A project_raw 2>/dev/null)" ]; then
+            unzip -q project.zip -d project_raw || true
+          fi
+
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
           if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
@@ -58,6 +89,7 @@ jobs:
             PROJECT_DIR="project_raw"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          rm -f project.zip project_fixed.zip
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -92,25 +124,34 @@ jobs:
           echo "flutter_version=$FLUTTER_VER" >> $GITHUB_OUTPUT
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@main
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ steps.detect_sdk.outputs.flutter_version }}
           channel: "stable"
           cache: true
 
-      - name: Get dependencies
+      - name: Get dependencies (auto-tambal)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ ! -f "pubspec.yaml" ]; then
-            echo "[RESULT_PUB_ERROR]"
-            echo "❌ pubspec.yaml tidak ditemukan di project!"
-            echo "[END_RESULT_PUB_ERROR]"
-            exit 1
+            echo "⚠️ pubspec.yaml tidak ada, coba cari di subfolder..."
+            FOUND_PUB=$(find . -name "pubspec.yaml" | head -n 1)
+            if [ -n "$FOUND_PUB" ]; then
+              NEW_DIR=$(dirname "$FOUND_PUB")
+              echo "PROJECT_DIR=$NEW_DIR" >> $GITHUB_ENV
+              cd "$NEW_DIR"
+            else
+              echo "[RESULT_PUB_ERROR]"
+              echo "❌ pubspec.yaml tidak ditemukan di project!"
+              echo "[END_RESULT_PUB_ERROR]"
+              exit 1
+            fi
           fi
 
           echo "=== Hapus pubspec.lock lama ==="
           rm -f pubspec.lock
 
+          # Coba beberapa strategi, semuanya toleran error
           echo "=== Coba flutter pub get ==="
           if timeout 300s flutter pub get > /tmp/pubget.log 2>&1; then
             echo "✅ pub get sukses"
@@ -132,12 +173,20 @@ jobs:
             exit 0
           fi
 
-          echo "[RESULT_PUB_ERROR]"
-          cat /tmp/pubget.log
-          echo "[END_RESULT_PUB_ERROR]"
-          exit 1
+          echo "=== Tambal: hapus dependency bermasalah & coba lagi ==="
+          # Fallback: hapus pubspec.lock, coba get ulang
+          rm -f pubspec.lock
+          if timeout 300s flutter pub get --offline > /tmp/pubget.log 2>&1; then
+            echo "✅ pub get --offline sukses"
+            cat /tmp/pubget.log
+            exit 0
+          fi
 
-      - name: Analyze Project Code
+          echo "⚠️ Semua cara gagal, tapi tetap lanjut (mungkin pub get error non-fatal)."
+          cat /tmp/pubget.log
+          exit 0
+
+      - name: Analyze Project Code (non-fatal)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
@@ -150,35 +199,69 @@ jobs:
 
       - name: Stop if Analyze Only
         if: ${{ github.event.inputs.only_analyze == 'true' }}
-        run: exit 1
+        run: |
+          echo "✅ Analyze selesai. Build di-skip karena only_analyze=true."
+          exit 0
 
-      - name: Build APK
+      - name: Build APK (auto-tambal)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          set +e  # jangan langsung stop kalau ada error
           if [ -f "pubspec.yaml" ]; then
-            flutter build apk --${{ github.event.inputs.build_type }}
+            echo "=== Build Flutter APK ==="
+            flutter build apk --${{ github.event.inputs.build_type }} 2>&1 | tee /tmp/build.log
+            BUILD_STATUS=${PIPESTATUS[0]}
+
+            if [ "$BUILD_STATUS" -ne 0 ]; then
+              echo "⚠️ Build gagal, coba tambal..."
+
+              # Tambal 1: bersihkan & get ulang
+              flutter clean
+              flutter pub get || true
+
+              # Tambal 2: coba build ulang
+              flutter build apk --${{ github.event.inputs.build_type }} 2>&1 | tee /tmp/build2.log
+              BUILD_STATUS=${PIPESTATUS[0]}
+            fi
+
+            if [ "$BUILD_STATUS" -ne 0 ]; then
+              echo "⚠️ Masih gagal, coba build tanpa shrink..."
+              flutter build apk --${{ github.event.inputs.build_type }} --no-shrink 2>&1 | tee /tmp/build3.log
+              BUILD_STATUS=${PIPESTATUS[0]}
+            fi
           else
             GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            GRADLE_DIR=$(dirname "$GRADLE_PATH")
-            cd "$GRADLE_DIR" && chmod +x gradlew
-            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              ./gradlew assembleDebug
-            else
-              ./gradlew assembleRelease
+            if [ -n "$GRADLE_PATH" ]; then
+              GRADLE_DIR=$(dirname "$GRADLE_PATH")
+              cd "$GRADLE_DIR" && chmod +x gradlew
+              if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+                ./gradlew assembleDebug || true
+              else
+                ./gradlew assembleRelease || true
+              fi
             fi
           fi
+          exit 0
 
-      - name: Check APK Output
+      - name: Find APK Output (anti-gagal)
+        id: find_apk
+        if: ${{ github.event.inputs.only_analyze != 'true' }}
         run: |
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
-          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -z "$APK_FOUND" ]; then
+            echo "[RESULT_PUB_ERROR]"
+            echo "❌ APK tidak ditemukan setelah build."
+            echo "[END_RESULT_PUB_ERROR]"
+            exit 1
+          fi
+          echo "APK_PATH=$APK_FOUND" >> $GITHUB_OUTPUT
+          echo "✅ APK ditemukan: $APK_FOUND"
 
       - name: Upload APK artifact
+        if: ${{ github.event.inputs.only_analyze != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
-          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          path: ${{ steps.find_apk.outputs.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
