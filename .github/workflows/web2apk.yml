@@ -16,6 +16,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -36,14 +37,16 @@ jobs:
           PKG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_')
           flutter create --org com.webapk --project-name "$PKG" myapp
 
-      - name: Add Dependencies
+      - name: Add Dependencies (auto-tambal)
         run: |
           cd myapp
-          flutter pub add webview_flutter
-          flutter pub add flutter_launcher_icons
-          flutter pub add connectivity_plus
-          echo "  assets:" >> pubspec.yaml
-          echo "    - assets/icon/" >> pubspec.yaml
+          flutter pub add webview_flutter || true
+          flutter pub add flutter_launcher_icons || true
+          flutter pub add connectivity_plus || true
+          grep -q "assets/icon" pubspec.yaml || {
+            echo "  assets:" >> pubspec.yaml
+            echo "    - assets/icon/" >> pubspec.yaml
+          }
 
       - name: Write main.dart
         run: |
@@ -93,21 +96,29 @@ jobs:
           sed -i "s|APPNAME_PLACEHOLDER|$APP_NAME|g" myapp/lib/main.dart
           sed -i "s|URL_PLACEHOLDER|$WEB_URL|g" myapp/lib/main.dart
 
-      - name: Fix Android Permissions
+      - name: Fix Android Permissions (aman kalau gagal)
         run: |
           APP_NAME="${{ github.event.inputs.app_name }}"
           MANIFEST="myapp/android/app/src/main/AndroidManifest.xml"
-          sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"\/>' $MANIFEST
-          sed -i "s/android:label=\"[^\"]*\"/android:label=\"$APP_NAME\"/" $MANIFEST
+          grep -q "android.permission.INTERNET" $MANIFEST || \
+            sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.INTERNET"\/>' $MANIFEST || true
+          sed -i "s/android:label=\"[^\"]*\"/android:label=\"$APP_NAME\"/" $MANIFEST || true
 
-      - name: Download Icon
+      - name: Download Icon (non-fatal)
         run: |
           mkdir -p myapp/assets/icon
-          sudo apt-get install -y imagemagick
-          curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/octet-stream" "${{ github.event.inputs.icon_url }}" -o myapp/assets/icon/icon_raw
-          convert myapp/assets/icon/icon_raw -resize 1024x1024 myapp/assets/icon/icon.png
+          sudo apt-get install -y imagemagick > /dev/null 2>&1 || true
+          curl -L --fail -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.icon_url }}" \
+            -o myapp/assets/icon/icon_raw || {
+              echo "⚠️ Gagal download icon, skip."
+              exit 0
+            }
+          convert myapp/assets/icon/icon_raw -resize 1024x1024 myapp/assets/icon/icon.png || \
+            cp myapp/assets/icon/icon_raw myapp/assets/icon/icon.png || true
 
-      - name: Generate Icons
+      - name: Generate Icons (non-fatal)
         run: |
           cat > myapp/flutter_launcher_icons.yaml << 'EOF'
           flutter_launcher_icons:
@@ -116,13 +127,48 @@ jobs:
             image_path: "assets/icon/icon.png"
             min_sdk_android: 21
           EOF
-          cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
+          cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml || true
 
-      - name: Build APK
-        run: cd myapp && flutter build apk --release
+      - name: Build APK (WAJIB SUKSES)
+        run: |
+          cd myapp
+          SUCCESS=0
+          flutter build apk --release 2>&1 | tee /tmp/w2a1.log
+          if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            flutter clean || true
+            flutter pub get || true
+            flutter build apk --release 2>&1 | tee /tmp/w2a2.log
+            if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
+          fi
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            echo "[RESULT_PUB_ERROR]"
+            echo "❌ Build Web2APK GAGAL."
+            tail -n 40 /tmp/w2a2.log 2>/dev/null || tail -n 40 /tmp/w2a1.log 2>/dev/null || true
+            echo "[END_RESULT_PUB_ERROR]"
+            exit 1
+          fi
+          echo "✅ Build sukses."
+
+      - name: Find APK
+        id: find_apk
+        run: |
+          APK=$(find $GITHUB_WORKSPACE -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "[RESULT_PUB_ERROR]"
+            echo "❌ APK tidak ditemukan!"
+            echo "[END_RESULT_PUB_ERROR]"
+            exit 1
+          fi
+          echo "APK_PATH=$APK" >> $GITHUB_OUTPUT
+          echo "✅ APK: $APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: web2apk-release
-          path: myapp/build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ steps.find_apk.outputs.APK_PATH }}
+          retention-days: 1
+          if-no-files-found: error
