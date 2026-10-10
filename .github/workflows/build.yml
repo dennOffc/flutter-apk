@@ -62,7 +62,7 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            flutter pub get || echo "⚠️ pub get error, lanjut..."
+            flutter pub get || flutter pub upgrade --major-versions || echo "⚠️ pub get gagal, lanjut..."
           else
             echo "❌ pubspec.yaml tidak ditemukan"
             exit 1
@@ -128,9 +128,10 @@ jobs:
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "[RESULT_DART_ERROR]"
-            echo "❌ BUILD FAILED — ERROR DART"
+            echo "❌ BUILD FAILED"
             echo ""
-            grep -nE '(^lib/.*\.dart|[a-zA-Z0-9_\-]+\.dart:[0-9]+:[0-9]+)' /tmp/build.log | head -n 30 || echo "(no match)"
+            echo "--- FILE ERRORS ---"
+            grep -nE '([a-zA-Z0-9_\-]+\.(dart|gradle|gradle\.kts|kt|java|xml|yaml|yml):[0-9]+)' /tmp/build.log | head -n 30 || echo "(no file match)"
             echo ""
             echo "════════ 40 BARIS TERAKHIR ════════"
             tail -n 40 /tmp/build.log
@@ -152,9 +153,10 @@ jobs:
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "[RESULT_DART_ERROR]"
-            echo "❌ BUILD FAILED — ERROR DART"
+            echo "❌ BUILD FAILED"
             echo ""
-            grep -nE '(^lib/.*\.dart|[a-zA-Z0-9_\-]+\.dart:[0-9]+:[0-9]+)' /tmp/build.log | head -n 30 || echo "(no match)"
+            echo "--- FILE ERRORS ---"
+            grep -nE '([a-zA-Z0-9_\-]+\.(dart|gradle|gradle\.kts|kt|java|xml|yaml|yml):[0-9]+)' /tmp/build.log | head -n 30 || echo "(no file match)"
             echo ""
             echo "════════ 40 BARIS TERAKHIR ════════"
             tail -n 40 /tmp/build.log
