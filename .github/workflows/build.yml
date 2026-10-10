@@ -43,34 +43,29 @@ jobs:
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip || {
               echo "[RESULT_PUB_ERROR]"
-              echo "❌ Gagal download ZIP dari URL."
+              echo "❌ Gagal download ZIP."
               echo "[END_RESULT_PUB_ERROR]"
               exit 1
             }
           ls -lh project.zip
 
-      - name: Extract ZIP (auto-fix + auto-detect project dir)
+      - name: Extract ZIP
         run: |
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "⚠️ File bukan ZIP valid, coba repair..."
-            if command -v zip >/dev/null 2>&1; then
-              zip -FF project.zip --out project_fixed.zip > /dev/null 2>&1 || true
-              if [ -f project_fixed.zip ] && unzip -t project_fixed.zip > /dev/null 2>&1; then
-                mv project_fixed.zip project.zip
-                echo "✅ ZIP berhasil diperbaiki."
-              fi
+            echo "⚠️ ZIP tidak valid, coba repair..."
+            zip -FF project.zip --out project_fixed.zip > /dev/null 2>&1 || true
+            if [ -f project_fixed.zip ] && unzip -t project_fixed.zip > /dev/null 2>&1; then
+              mv project_fixed.zip project.zip
             fi
             if ! unzip -t project.zip > /dev/null 2>&1; then
-              echo "⚠️ Tetap gagal, coba extract paksa (mungkin partial)..."
               mkdir -p project_raw
               unzip -o -q project.zip -d project_raw || true
               if [ -z "$(ls -A project_raw 2>/dev/null)" ]; then
                 echo "[RESULT_PUB_ERROR]"
-                echo "❌ File benar-benar bukan ZIP valid dan tidak bisa di-extract."
+                echo "❌ ZIP tidak bisa di-extract."
                 echo "[END_RESULT_PUB_ERROR]"
                 exit 1
               fi
-              echo "⚠️ Extract partial berhasil, lanjut..."
             fi
           fi
 
@@ -78,27 +73,19 @@ jobs:
             unzip -q project.zip -d project_raw || true
           fi
 
-          echo "=== Struktur awal project_raw ==="
-          find project_raw -maxdepth 2 -type d | head -n 20
-          echo "=== File di root project_raw ==="
-          find project_raw -maxdepth 1 -type f | head -n 20
+          echo "=== Struktur project_raw ==="
+          find project_raw -maxdepth 3 -type d | head -n 20
 
           PUB_PATH=$(find project_raw -maxdepth 4 -name "pubspec.yaml" 2>/dev/null | head -n 1)
-          if [ -n "$PUB_PATH" ]; then
-            PROJECT_DIR=$(dirname "$PUB_PATH")
-            echo "✅ pubspec.yaml ditemukan di: $PUB_PATH"
-            echo "✅ PROJECT_DIR di-set ke: $PROJECT_DIR"
-          else
-            SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
-            FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
-            if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
-              PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
-            else
-              PROJECT_DIR="project_raw"
-            fi
-            echo "⚠️ pubspec.yaml tidak ketemu, fallback PROJECT_DIR=$PROJECT_DIR"
+          if [ -z "$PUB_PATH" ]; then
+            echo "[RESULT_PUB_ERROR]"
+            echo "❌ pubspec.yaml tidak ditemukan sama sekali di ZIP."
+            echo "[END_RESULT_PUB_ERROR]"
+            exit 1
           fi
-
+          PROJECT_DIR=$(dirname "$PUB_PATH")
+          echo "✅ pubspec.yaml ada di: $PUB_PATH"
+          echo "✅ PROJECT_DIR: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           rm -f project.zip project_fixed.zip
 
@@ -108,10 +95,10 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Detect Dart SDK Requirement
+      - name: Detect Dart SDK
         id: detect_sdk
-        working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          cd "$PROJECT_DIR"
           if [ ! -f "pubspec.yaml" ]; then
             echo "flutter_version=3.32.0" >> $GITHUB_OUTPUT
             exit 0
@@ -141,22 +128,12 @@ jobs:
           channel: "stable"
           cache: true
 
-      - name: Get dependencies (auto-tambal)
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Get dependencies
         run: |
-          PUB_PATH=$(find . -maxdepth 3 -name "pubspec.yaml" | head -n 1)
-          if [ -z "$PUB_PATH" ]; then
-            echo "[RESULT_PUB_ERROR]"
-            echo "❌ pubspec.yaml TIDAK DITEMUKAN."
-            ls -la
-            echo "[END_RESULT_PUB_ERROR]"
-            exit 1
-          fi
-          PROJECT_REAL_DIR=$(dirname "$PUB_PATH")
-          echo "PROJECT_DIR=$PROJECT_REAL_DIR" >> $GITHUB_ENV
-          cd "$PROJECT_REAL_DIR"
-
+          cd "$PROJECT_DIR"
+          echo "📍 PWD: $(pwd)"
           rm -f pubspec.lock
+
           if timeout 300s flutter pub get > /tmp/pubget.log 2>&1; then
             echo "✅ pub get sukses"; cat /tmp/pubget.log; exit 0
           fi
@@ -170,12 +147,13 @@ jobs:
           if timeout 300s flutter pub get --offline > /tmp/pubget.log 2>&1; then
             echo "✅ pub get --offline sukses"; cat /tmp/pubget.log; exit 0
           fi
-          echo "⚠️ pub get gagal, tetap lanjut."; cat /tmp/pubget.log
+          echo "⚠️ pub get gagal, tetap lanjut."
+          cat /tmp/pubget.log
           exit 0
 
-      - name: Analyze Project Code (non-fatal)
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Analyze Project Code
         run: |
+          cd "$PROJECT_DIR"
           if [ -f "pubspec.yaml" ]; then
             flutter analyze > analyze_report.txt 2>&1 || true
             echo "[RESULT_ANALYZE]"
@@ -190,52 +168,97 @@ jobs:
           echo "✅ Analyze selesai."
           exit 0
 
-      - name: Build APK (WAJIB SUKSES)
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Build APK (auto-tambal + deteksi error Dart)
         run: |
+          cd "$PROJECT_DIR"
+          echo "📍 PWD: $(pwd)"
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "[RESULT_PUB_ERROR]"
-            echo "❌ pubspec.yaml tidak ada di ${{ env.PROJECT_DIR }}"
-            ls -la
-            echo "[END_RESULT_PUB_ERROR]"
-            exit 1
+          SUCCESS=0
+
+          # PRE-BUILD: auto-strip assets yang hilang
+          echo "════════ PRE-BUILD: sanitasi assets ════════"
+          if [ -f "pubspec.yaml" ]; then
+            cp pubspec.yaml pubspec.yaml.bak
+            python3 - <<'PYEOF' 2>/dev/null || true
+          import os
+          try:
+              with open("pubspec.yaml", "r") as f:
+                  lines = f.read().split("
+")
+              out, in_assets = [], False
+              for line in lines:
+                  stripped = line.strip()
+                  if stripped.startswith("assets:"):
+                      in_assets = True
+                      out.append(line)
+                      continue
+                  if in_assets:
+                      if line and not line[0] in (" ", "	") and not stripped.startswith("-"):
+                          in_assets = False
+                          out.append(line)
+                          continue
+                      if stripped.startswith("-"):
+                          p = stripped[1:].strip().strip('"').strip("'")
+                          if p and not os.path.exists(p):
+                              print(f"  ⚠️ Skip missing asset: {p}")
+                              continue
+                  out.append(line)
+              with open("pubspec.yaml", "w") as f:
+                  f.write("
+".join(out))
+              print("✅ Assets sanitized")
+          except Exception as e:
+              print(f"⚠️ Asset sanitize error: {e}")
+          PYEOF
           fi
 
-          SUCCESS=0
+          # ATTEMPT 1
           echo "════════ ATTEMPT 1 ════════"
-          flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build1.log
+          flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build1.log || true
           if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
 
+          # ATTEMPT 2
           if [ "$SUCCESS" -eq 0 ]; then
-            echo "════════ ATTEMPT 2 ════════"
+            echo "════════ ATTEMPT 2: clean + rebuild ════════"
             flutter clean || true
             flutter pub get || true
-            flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build2.log
+            flutter build apk --$BUILD_TYPE 2>&1 | tee /tmp/build2.log || true
             if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
           fi
 
+          # ATTEMPT 3
           if [ "$SUCCESS" -eq 0 ]; then
-            echo "════════ ATTEMPT 3 ════════"
-            flutter build apk --$BUILD_TYPE --no-shrink 2>&1 | tee /tmp/build3.log
+            echo "════════ ATTEMPT 3: --no-shrink ════════"
+            flutter build apk --$BUILD_TYPE --no-shrink 2>&1 | tee /tmp/build3.log || true
             if [ -n "$(find . -name '*.apk' 2>/dev/null | head -n 1)" ]; then SUCCESS=1; fi
           fi
 
+          # GAGAL TOTAL
           if [ "$SUCCESS" -eq 0 ]; then
+            FINAL_LOG=/tmp/build3.log
+            if [ ! -s "$FINAL_LOG" ]; then FINAL_LOG=/tmp/build2.log; fi
+            if [ ! -s "$FINAL_LOG" ]; then FINAL_LOG=/tmp/build1.log; fi
+
             echo "[RESULT_PUB_ERROR]"
-            echo "❌ Build GAGAL TOTAL."
-            echo "--- 40 baris log 3 ---"
-            tail -n 40 /tmp/build3.log 2>/dev/null || true
-            echo "--- 40 baris log 2 ---"
-            tail -n 40 /tmp/build2.log 2>/dev/null || true
-            echo "--- 40 baris log 1 ---"
-            tail -n 40 /tmp/build1.log 2>/dev/null || true
+            echo "❌ Build GAGAL setelah 3x percobaan."
+            echo ""
+            echo "=== DART ERRORS ==="
+            grep -nE '(\.dart:[0-9]+:[0-9]+:.*(Error|error)|Error:.*\.dart)' "$FINAL_LOG" 2>/dev/null | head -n 20 || echo "(tidak ada error Dart)"
+            echo "=== END DART ERRORS ==="
+            echo ""
+            echo "=== GRADLE ERRORS ==="
+            grep -iE "(FAILURE:|What went wrong|Execution failed|Could not)" "$FINAL_LOG" 2>/dev/null | head -n 10 || echo "(tidak ada error Gradle)"
+            echo "=== END GRADLE ERRORS ==="
+            echo ""
+            echo "=== 40 BARIS TERAKHIR ==="
+            tail -n 40 "$FINAL_LOG" 2>/dev/null || true
             echo "[END_RESULT_PUB_ERROR]"
             exit 1
           fi
+
           echo "✅ Build sukses, APK ada."
 
-      - name: Find APK Output (validasi)
+      - name: Find APK Output
         id: find_apk
         if: ${{ github.event.inputs.only_analyze != 'true' }}
         run: |
